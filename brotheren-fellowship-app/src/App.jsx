@@ -145,16 +145,47 @@ export default function App() {
     }
   };
 
+  // Helper: Upload Audio file to Supabase Storage
+  const uploadAudioFile = async (file) => {
+    if (!file) return null;
+    const fileExt = file.name ? file.name.split('.').pop() : 'mp3';
+    const cleanName = `${Date.now()}_${Math.random().toString(36).substring(2, 8)}.${fileExt}`;
+    const filePath = `audio/${cleanName}`;
+
+    const { error: uploadError } = await supabase.storage
+      .from('songs')
+      .upload(filePath, file, { cacheControl: '3600', upsert: false });
+
+    if (uploadError) {
+      console.error('Audio upload error:', uploadError);
+      return null;
+    }
+
+    const { data } = supabase.storage.from('songs').getPublicUrl(filePath);
+    return data.publicUrl;
+  };
+
   // Save / Update Song to Supabase
   const handleSaveSong = async (formData) => {
+    let finalAudioUrl = formData.audioUrl || null;
+
+    if (formData.audioBlob instanceof Blob || formData.audioBlob instanceof File) {
+      const uploadedUrl = await uploadAudioFile(formData.audioBlob);
+      if (uploadedUrl) finalAudioUrl = uploadedUrl;
+    }
+
+    const startingLetter = formData.startingLetter || 
+      (formData.title ? formData.title.trim().charAt(0) : 'అ');
+
     if (songToEdit) {
       await supabase
         .from('songs')
         .update({
           title: formData.title,
-          starting_letter: formData.startingLetter,
+          starting_letter: startingLetter,
           lyrics: formData.lyrics || '',
-          singer: formData.singer || ''
+          singer: formData.singer || '',
+          audio_url: finalAudioUrl
         })
         .eq('id', songToEdit.id);
       setSongToEdit(null);
@@ -163,9 +194,10 @@ export default function App() {
         .from('songs')
         .insert([{
           title: formData.title,
-          starting_letter: formData.startingLetter,
+          starting_letter: startingLetter,
           lyrics: formData.lyrics || '',
           singer: formData.singer || '',
+          audio_url: finalAudioUrl,
           liked: false
         }]);
     }
@@ -209,22 +241,30 @@ export default function App() {
       try {
         const importedSongs = JSON.parse(event.target.result);
         if (Array.isArray(importedSongs)) {
-          const rows = importedSongs.map(s => ({
-            title: s.title,
-            starting_letter: s.startingLetter || s.starting_letter,
-            lyrics: s.lyrics || '',
-            singer: s.singer || '',
-            liked: s.liked || false
-          }));
-          await supabase.from('songs').insert(rows);
+          const rows = importedSongs.map(s => {
+            const letter = s.startingLetter || s.starting_letter || (s.title ? s.title.trim().charAt(0) : 'అ');
+            return {
+              title: s.title || 'Untitled',
+              starting_letter: letter,
+              lyrics: s.lyrics || '',
+              singer: s.singer || '',
+              audio_url: s.audioUrl || s.audio_url || null,
+              liked: s.liked || false
+            };
+          });
+
+          const { error } = await supabase.from('songs').insert(rows);
+          if (error) throw error;
+
           await reloadSongs();
-          alert(t.importSuccess);
+          alert(t.importSuccess || 'Songs imported successfully!');
         }
       } catch (err) {
-        alert(t.importFailed + err.message);
+        alert((t.importFailed || 'Import failed: ') + err.message);
       }
     };
     reader.readAsText(file);
+    e.target.value = '';
   };
 
   const handleClearAll = async () => {
