@@ -168,9 +168,14 @@ export default function App() {
     }
   };
 
-  // When clicking a song: Open lyrics details AND trigger playback without closing
+  // Click Song Card: ONLY open lyrics modal / view
   const handleSelectSong = (song) => {
     setDetailSong(song);
+  };
+
+  // Click Play Button: Explicitly starts audio playback
+  const handlePlaySong = (e, song) => {
+    e.stopPropagation();
     setActiveSong(song);
   };
 
@@ -499,9 +504,7 @@ export default function App() {
           </button>
         </div>
 
-        {/* ============================================================== */}
-        {/* SCREEN 1: ALPHABET GRID (Hides completely when letter is clicked) */}
-        {/* ============================================================== */}
+        {/* SCREEN 1: ALPHABET GRID */}
         {!isViewingSubpage && (
           <div className="bg-slate-900 p-4 sm:p-5 rounded-2xl shadow-sm border border-slate-800 space-y-4">
             <h2 className="text-xs uppercase font-bold text-slate-400 tracking-wider">
@@ -536,9 +539,7 @@ export default function App() {
           </div>
         )}
 
-        {/* ============================================================== */}
-        {/* SCREEN 2: DEDICATED SONGS LIST FOR SELECTED LETTER OR SEARCH  */}
-        {/* ============================================================== */}
+        {/* SCREEN 2: DEDICATED SONGS LIST */}
         {isViewingSubpage && (
           <div className="space-y-4">
             <div className="flex items-center justify-between text-base font-semibold text-slate-300 px-1">
@@ -564,7 +565,7 @@ export default function App() {
                     key={song.id}
                     className="bg-slate-900 border border-slate-800 hover:border-blue-500 rounded-2xl p-4 flex items-center justify-between gap-3 shadow-sm transition-all"
                   >
-                    {/* Clicking song opens Lyrics and plays automatically */}
+                    {/* Clicking song title: Opens lyrics screen ONLY (does not start playing audio) */}
                     <div 
                       className="flex-1 cursor-pointer truncate"
                       onClick={() => handleSelectSong(song)}
@@ -599,9 +600,9 @@ export default function App() {
                         />
                       </button>
 
-                      {/* Play Button */}
+                      {/* Explicit Play Button: Plays audio only when clicked */}
                       <button
-                        onClick={() => handleSelectSong(song)}
+                        onClick={(e) => handlePlaySong(e, song)}
                         className="p-2.5 bg-blue-950/70 text-blue-400 hover:bg-blue-900 hover:text-white rounded-full active:scale-95 border border-blue-800"
                         aria-label="Play"
                       >
@@ -622,9 +623,7 @@ export default function App() {
         )}
       </main>
 
-      {/* ============================================================== */}
-      {/* SCREEN 3: DEDICATED SONG VIEW (Lyrics + Controls + Bottom Player) */}
-      {/* ============================================================== */}
+      {/* SCREEN 3: DEDICATED SONG VIEW (Lyrics) */}
       {detailSong && (
         <SongDetailsModal
           song={detailSong}
@@ -650,7 +649,7 @@ export default function App() {
         />
       )}
 
-      {/* Persistent Audio Player */}
+      {/* Persistent Audio Player (Active only when a song is explicitly played) */}
       <AudioPlayer
         currentSong={activeSong}
         onNext={handleNextSong}
