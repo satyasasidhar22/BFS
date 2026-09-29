@@ -41,6 +41,27 @@ export default function App() {
     localStorage.setItem('app_lang', newLang);
   };
 
+  // Hardware / Gesture Back Navigation handler
+  useEffect(() => {
+    const handlePopState = () => {
+      if (detailSong) {
+        setDetailSong(null);
+      } else if (showFormModal) {
+        setShowFormModal(false);
+        setSongToEdit(null);
+      } else if (showSettings) {
+        setShowSettings(false);
+      } else if (selectedLetter || showLikedOnly || searchQuery.trim()) {
+        setSelectedLetter(null);
+        setShowLikedOnly(false);
+        setSearchQuery('');
+      }
+    };
+
+    window.addEventListener('popstate', handlePopState);
+    return () => window.removeEventListener('popstate', handlePopState);
+  }, [detailSong, showFormModal, showSettings, selectedLetter, showLikedOnly, searchQuery]);
+
   // Online / Offline monitor
   useEffect(() => {
     const handleOnline = () => {
@@ -118,7 +139,6 @@ export default function App() {
     };
   }, []);
 
-  // Check if viewing a letter subpage, search results, or liked list
   const isViewingSubpage = Boolean(selectedLetter || showLikedOnly || searchQuery.trim());
 
   const resetFilters = () => {
@@ -168,15 +188,27 @@ export default function App() {
     }
   };
 
-  // Click Song Card: ONLY open lyrics modal / view
+  // Open Letter Screen with history state
+  const handleSelectLetter = (letter) => {
+    window.history.pushState({ view: 'letter', letter }, '');
+    setSelectedLetter(letter);
+  };
+
+  // Open Song Lyrics View with history state
   const handleSelectSong = (song) => {
+    window.history.pushState({ view: 'song', id: song.id }, '');
     setDetailSong(song);
   };
 
-  // Click Play Button: Explicitly starts audio playback
+  // Play button click (starts playback without adding history entry)
   const handlePlaySong = (e, song) => {
     e.stopPropagation();
     setActiveSong(song);
+  };
+
+  // Back click handler for UI buttons
+  const handleGoBack = () => {
+    window.history.back();
   };
 
   // Like Toggle in Cloud & Local Cache
@@ -364,7 +396,7 @@ export default function App() {
           <div className="flex items-center gap-2 min-w-0">
             {isViewingSubpage ? (
               <button
-                onClick={resetFilters}
+                onClick={handleGoBack}
                 className="p-1.5 hover:bg-blue-800 rounded-full transition-colors text-white active:scale-95 shrink-0"
                 title={t.back}
               >
@@ -477,11 +509,11 @@ export default function App() {
           </div>
         )}
 
-        {/* Quick Filter Navigation Bar */}
+        {/* Quick Nav: Show All / Liked Songs */}
         <div className="flex items-center gap-2 overflow-x-auto pb-1 no-scrollbar">
           {isViewingSubpage && (
             <button
-              onClick={resetFilters}
+              onClick={handleGoBack}
               className="flex items-center gap-1.5 px-3.5 py-2 bg-blue-900/60 text-blue-200 rounded-xl text-sm font-semibold border border-blue-700 shrink-0 active:scale-95"
             >
               <ArrowLeft size={16} /> {t.showAll}
@@ -490,6 +522,7 @@ export default function App() {
 
           <button
             onClick={() => {
+              window.history.pushState({ view: 'liked' }, '');
               setShowLikedOnly(!showLikedOnly);
               setSelectedLetter(null);
             }}
@@ -516,7 +549,7 @@ export default function App() {
               {TELUGU_VOWELS.map((letter) => (
                 <button
                   key={letter}
-                  onClick={() => setSelectedLetter(letter)}
+                  onClick={() => handleSelectLetter(letter)}
                   className="h-12 rounded-xl text-xl font-bold flex items-center justify-center transition-all bg-slate-800/80 hover:bg-blue-600 text-slate-100 hover:text-white active:scale-95 border border-slate-700/50 hover:border-blue-500 shadow-sm"
                 >
                   {letter}
@@ -529,7 +562,7 @@ export default function App() {
               {TELUGU_CONSONANTS.map((letter) => (
                 <button
                   key={letter}
-                  onClick={() => setSelectedLetter(letter)}
+                  onClick={() => handleSelectLetter(letter)}
                   className="h-12 rounded-xl text-lg font-bold flex items-center justify-center transition-all bg-slate-800/60 hover:bg-blue-600 text-slate-200 hover:text-white active:scale-95 border border-slate-700/50 hover:border-blue-500 shadow-sm"
                 >
                   {letter}
@@ -551,7 +584,7 @@ export default function App() {
                     : `Search Results (${filteredSongs.length})`}
               </span>
               <button 
-                onClick={resetFilters} 
+                onClick={handleGoBack} 
                 className="text-xs text-blue-400 hover:underline flex items-center gap-1"
               >
                 <ArrowLeft size={14} /> Back to Letters
@@ -565,7 +598,6 @@ export default function App() {
                     key={song.id}
                     className="bg-slate-900 border border-slate-800 hover:border-blue-500 rounded-2xl p-4 flex items-center justify-between gap-3 shadow-sm transition-all"
                   >
-                    {/* Clicking song title: Opens lyrics screen ONLY (does not start playing audio) */}
                     <div 
                       className="flex-1 cursor-pointer truncate"
                       onClick={() => handleSelectSong(song)}
@@ -600,7 +632,7 @@ export default function App() {
                         />
                       </button>
 
-                      {/* Explicit Play Button: Plays audio only when clicked */}
+                      {/* Explicit Play Button */}
                       <button
                         onClick={(e) => handlePlaySong(e, song)}
                         className="p-2.5 bg-blue-950/70 text-blue-400 hover:bg-blue-900 hover:text-white rounded-full active:scale-95 border border-blue-800"
@@ -627,7 +659,7 @@ export default function App() {
       {detailSong && (
         <SongDetailsModal
           song={detailSong}
-          onClose={() => setDetailSong(null)}
+          onClose={handleGoBack}
           onPlay={(s) => setActiveSong(s)}
           onToggleLike={handleToggleLike}
           onEdit={handleOpenEdit}
@@ -649,7 +681,7 @@ export default function App() {
         />
       )}
 
-      {/* Persistent Audio Player (Active only when a song is explicitly played) */}
+      {/* Persistent Audio Player */}
       <AudioPlayer
         currentSong={activeSong}
         onNext={handleNextSong}
