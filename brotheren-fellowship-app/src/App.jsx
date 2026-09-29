@@ -1,9 +1,14 @@
 ﻿import React, { useState, useEffect, useMemo, useRef } from 'react';
 import { 
   Heart, Search, PlusCircle, Settings, Play, Music, Download, Upload, Trash2, 
-  BookOpen, Globe, ArrowLeft, Edit3
+  BookOpen, Globe, ArrowLeft, Edit3, WifiOff
 } from 'lucide-react';
-import { TELUGU_VOWELS, TELUGU_CONSONANTS } from './db/indexedDB';
+import { 
+  TELUGU_VOWELS, 
+  TELUGU_CONSONANTS, 
+  saveSongsOfflineCache, 
+  getOfflineSongsCache 
+} from './db/indexedDB';
 import { supabase } from './supabaseClient';
 import { translations } from './utils/translations';
 import { useWakeLock } from './hooks/useWakeLock';
@@ -18,6 +23,7 @@ export default function App() {
   const [showLikedOnly, setShowLikedOnly] = useState(false);
   const [activeSong, setActiveSong] = useState(null);
   const [detailSong, setDetailSong] = useState(null);
+  const [isOnline, setIsOnline] = useState(navigator.onLine);
   
   // Modals
   const [showFormModal, setShowFormModal] = useState(false);
@@ -35,36 +41,66 @@ export default function App() {
     localStorage.setItem('app_lang', newLang);
   };
 
-  // Fetch songs from Supabase
-  const reloadSongs = async () => {
-    const { data, error } = await supabase
-      .from('songs')
-      .select('*')
-      .order('id', { ascending: false });
+  // Online / Offline monitor
+  useEffect(() => {
+    const handleOnline = () => {
+      setIsOnline(true);
+      reloadSongs();
+    };
+    const handleOffline = () => setIsOnline(false);
 
-    if (error) {
-      console.error('Error fetching songs from Supabase:', error);
+    window.addEventListener('online', handleOnline);
+    window.addEventListener('offline', handleOffline);
+
+    return () => {
+      window.removeEventListener('online', handleOnline);
+      window.removeEventListener('offline', handleOffline);
+    };
+  }, []);
+
+  // Fetch songs with automatic offline IndexedDB fallback
+  const reloadSongs = async () => {
+    if (!navigator.onLine) {
+      const cached = await getOfflineSongsCache();
+      if (cached && cached.length > 0) setSongs(cached);
       return;
     }
 
-    if (data) {
-      const normalizedSongs = data.map(item => ({
-        id: item.id,
-        title: item.title,
-        startingLetter: item.starting_letter,
-        lyrics: item.lyrics,
-        singer: item.singer,
-        audioBlob: item.audio_url,
-        audioUrl: item.audio_url,
-        liked: item.liked || false
-      }));
-      setSongs(normalizedSongs);
+    try {
+      const { data, error } = await supabase
+        .from('songs')
+        .select('*')
+        .order('id', { ascending: false });
+
+      if (error) throw error;
+
+      if (data) {
+        const normalizedSongs = data.map(item => ({
+          id: item.id,
+          title: item.title,
+          startingLetter: item.starting_letter,
+          lyrics: item.lyrics,
+          singer: item.singer,
+          audioBlob: item.audio_url,
+          audioUrl: item.audio_url,
+          liked: item.liked || false
+        }));
+
+        setSongs(normalizedSongs);
+        await saveSongsOfflineCache(normalizedSongs);
+      }
+    } catch (err) {
+      console.warn('Network issue or Supabase fetch failed. Falling back to local offline cache:', err);
+      const cached = await getOfflineSongsCache();
+      if (cached && cached.length > 0) setSongs(cached);
     }
   };
 
-  // Real-time synchronization across all devices
+  // Real-time synchronization when online
   useEffect(() => {
     reloadSongs();
+
+    if (!navigator.onLine) return;
 
     const channel = supabase
       .channel('realtime_songs')
@@ -82,7 +118,8 @@ export default function App() {
     };
   }, []);
 
-  const isFiltered = Boolean(selectedLetter || showLikedOnly || searchQuery.trim());
+  // Check if viewing a letter subpage, search results, or liked list
+  const isViewingSubpage = Boolean(selectedLetter || showLikedOnly || searchQuery.trim());
 
   const resetFilters = () => {
     setSelectedLetter(null);
@@ -115,7 +152,9 @@ export default function App() {
     if (!activeSong || filteredSongs.length === 0) return;
     const currentIndex = filteredSongs.findIndex(s => s.id === activeSong.id);
     if (currentIndex !== -1 && currentIndex < filteredSongs.length - 1) {
-      setActiveSong(filteredSongs[currentIndex + 1]);
+      const next = filteredSongs[currentIndex + 1];
+      setActiveSong(next);
+      if (detailSong) setDetailSong(next);
     }
   };
 
@@ -123,25 +162,37 @@ export default function App() {
     if (!activeSong || filteredSongs.length === 0) return;
     const currentIndex = filteredSongs.findIndex(s => s.id === activeSong.id);
     if (currentIndex > 0) {
-      setActiveSong(filteredSongs[currentIndex - 1]);
+      const prev = filteredSongs[currentIndex - 1];
+      setActiveSong(prev);
+      if (detailSong) setDetailSong(prev);
     }
   };
 
-  // Like Toggle in Cloud
+  // When clicking a song: Open lyrics details AND trigger playback without closing
+  const handleSelectSong = (song) => {
+    setDetailSong(song);
+    setActiveSong(song);
+  };
+
+  // Like Toggle in Cloud & Local Cache
   const handleToggleLike = async (id) => {
     const target = songs.find(s => s.id === id);
     if (!target) return;
     const newLikedStatus = !target.liked;
 
-    await supabase
-      .from('songs')
-      .update({ liked: newLikedStatus })
-      .eq('id', id);
-
-    setSongs(prev => prev.map(s => s.id === id ? { ...s, liked: newLikedStatus } : s));
+    const updatedSongs = songs.map(s => s.id === id ? { ...s, liked: newLikedStatus } : s);
+    setSongs(updatedSongs);
+    await saveSongsOfflineCache(updatedSongs);
 
     if (detailSong && detailSong.id === id) {
       setDetailSong(prev => ({ ...prev, liked: newLikedStatus }));
+    }
+
+    if (navigator.onLine) {
+      await supabase
+        .from('songs')
+        .update({ liked: newLikedStatus })
+        .eq('id', id);
     }
   };
 
@@ -165,8 +216,13 @@ export default function App() {
     return data.publicUrl;
   };
 
-  // Save / Update Song to Supabase
+  // Save / Update Song
   const handleSaveSong = async (formData) => {
+    if (!navigator.onLine) {
+      alert('Adding/Editing songs requires an active internet connection to sync with all members.');
+      return;
+    }
+
     let finalAudioUrl = formData.audioUrl || null;
 
     if (formData.audioBlob instanceof Blob || formData.audioBlob instanceof File) {
@@ -211,8 +267,13 @@ export default function App() {
     setShowFormModal(true);
   };
 
-  // Delete Song from Supabase
+  // Delete Song
   const handleDeleteSong = async (id) => {
+    if (!navigator.onLine) {
+      alert('Deleting songs requires an active internet connection.');
+      return;
+    }
+
     if (window.confirm(t.confirmDelete)) {
       await supabase.from('songs').delete().eq('id', id);
       if (activeSong?.id === id) setActiveSong(null);
@@ -268,6 +329,10 @@ export default function App() {
   };
 
   const handleClearAll = async () => {
+    if (!navigator.onLine) {
+      alert('Network needed to delete songs.');
+      return;
+    }
     if (window.confirm(t.confirmClearAll)) {
       await supabase.from('songs').delete().neq('id', 0);
       setActiveSong(null);
@@ -277,18 +342,25 @@ export default function App() {
   };
 
   return (
-    <div className="min-h-screen bg-slate-50 dark:bg-slate-950 text-slate-900 dark:text-slate-100 flex flex-col font-sans">
+    <div className="min-h-screen bg-slate-950 text-slate-100 flex flex-col font-sans">
       
+      {/* Offline Status Banner */}
+      {!isOnline && (
+        <div className="bg-amber-500 text-slate-950 text-xs font-bold py-1 px-4 text-center flex items-center justify-center gap-1.5 shadow-sm">
+          <WifiOff size={14} /> ఆఫ్‌లైన్ మోడ్ (Offline Mode - Local songs loaded)
+        </div>
+      )}
+
       {/* Top Header */}
-      <header className="sticky top-0 z-30 bg-blue-800 text-white shadow-md">
+      <header className="sticky top-0 z-30 bg-blue-900 text-white shadow-md">
         <div className="max-w-6xl mx-auto px-3 sm:px-6 py-2.5 sm:py-3.5 flex items-center justify-between gap-2">
           
           {/* Back button or App Logo */}
           <div className="flex items-center gap-2 min-w-0">
-            {isFiltered ? (
+            {isViewingSubpage ? (
               <button
                 onClick={resetFilters}
-                className="p-1.5 hover:bg-blue-700 rounded-full transition-colors text-white active:scale-95 shrink-0"
+                className="p-1.5 hover:bg-blue-800 rounded-full transition-colors text-white active:scale-95 shrink-0"
                 title={t.back}
               >
                 <ArrowLeft size={22} />
@@ -297,14 +369,16 @@ export default function App() {
               <BookOpen className="text-amber-300 shrink-0" size={24} />
             )}
             <h1 className="text-base sm:text-xl font-bold tracking-tight truncate">
-              {t.appName}
+              {isViewingSubpage && selectedLetter 
+                ? `${t.songsStartingWith.replace('{letter}', selectedLetter)} (${filteredSongs.length})` 
+                : t.appName}
             </h1>
           </div>
 
           {/* Controls: Language Pill, Add, Settings */}
           <div className="flex items-center gap-1.5 sm:gap-2 shrink-0">
             {/* Language Selector */}
-            <div className="flex items-center bg-blue-900/70 border border-blue-700 rounded-lg p-0.5 text-xs font-semibold">
+            <div className="flex items-center bg-blue-950/70 border border-blue-700 rounded-lg p-0.5 text-xs font-semibold">
               <Globe size={13} className="ml-1 mr-0.5 text-blue-300 hidden md:inline" />
               {['te', 'en', 'hi'].map((code) => (
                 <button
@@ -325,7 +399,7 @@ export default function App() {
                 setSongToEdit(null);
                 setShowFormModal(true);
               }} 
-              className="p-2 hover:bg-blue-700 rounded-full text-white active:scale-95 transition-transform" 
+              className="p-2 hover:bg-blue-800 rounded-full text-white active:scale-95 transition-transform" 
               title={t.addSong}
             >
               <PlusCircle size={22} />
@@ -334,7 +408,7 @@ export default function App() {
             {/* Settings */}
             <button 
               onClick={() => setShowSettings(!showSettings)} 
-              className="p-2 hover:bg-blue-700 rounded-full text-white active:scale-95 transition-transform" 
+              className="p-2 hover:bg-blue-800 rounded-full text-white active:scale-95 transition-transform" 
               title={t.settings}
             >
               <Settings size={20} />
@@ -351,25 +425,25 @@ export default function App() {
               value={searchQuery}
               onChange={(e) => setSearchQuery(e.target.value)}
               placeholder={t.searchPlaceholder}
-              className="w-full pl-10 pr-4 py-2 sm:py-2.5 rounded-xl bg-white text-slate-900 placeholder-slate-400 focus:outline-none focus:ring-2 focus:ring-amber-300 shadow-inner text-base"
+              className="w-full pl-10 pr-4 py-2 sm:py-2.5 rounded-xl bg-slate-900 text-white placeholder-slate-400 border border-slate-700 focus:outline-none focus:ring-2 focus:ring-amber-300 text-base"
             />
           </div>
         </div>
       </header>
 
       {/* Main Content Area */}
-      <main className="flex-1 max-w-6xl w-full mx-auto px-3 sm:px-6 py-4 pb-32 space-y-6">
+      <main className="flex-1 max-w-6xl w-full mx-auto px-3 sm:px-6 py-4 pb-36 space-y-5">
         
         {/* Settings Drawer */}
         {showSettings && (
-          <div className="p-4 sm:p-5 bg-white dark:bg-slate-900 border border-slate-200 dark:border-slate-800 rounded-2xl shadow-sm space-y-3">
+          <div className="p-4 sm:p-5 bg-slate-900 border border-slate-800 rounded-2xl shadow-sm space-y-3">
             <div className="flex items-center justify-between">
-              <h3 className="font-bold text-base flex items-center gap-2">
+              <h3 className="font-bold text-base flex items-center gap-2 text-white">
                 <Settings size={18} /> {t.dataManagement}
               </h3>
               <button 
                 onClick={() => setShowSettings(false)}
-                className="text-xs text-slate-400 hover:text-slate-600 underline"
+                className="text-xs text-slate-400 hover:text-slate-200 underline"
               >
                 {t.cancel}
               </button>
@@ -377,20 +451,20 @@ export default function App() {
             <div className="flex flex-wrap gap-2 text-sm">
               <button 
                 onClick={handleExport}
-                className="flex items-center gap-1.5 px-3 py-2 bg-slate-100 dark:bg-slate-800 hover:bg-slate-200 dark:hover:bg-slate-700 rounded-xl"
+                className="flex items-center gap-1.5 px-3 py-2 bg-slate-800 hover:bg-slate-700 text-slate-200 rounded-xl"
               >
                 <Download size={16} /> {t.exportSongs}
               </button>
               <button 
                 onClick={() => fileInputRef.current?.click()}
-                className="flex items-center gap-1.5 px-3 py-2 bg-slate-100 dark:bg-slate-800 hover:bg-slate-200 dark:hover:bg-slate-700 rounded-xl"
+                className="flex items-center gap-1.5 px-3 py-2 bg-slate-800 hover:bg-slate-700 text-slate-200 rounded-xl"
               >
                 <Upload size={16} /> {t.importSongs}
               </button>
               <input ref={fileInputRef} type="file" accept=".json" onChange={handleImport} className="hidden" />
               <button 
                 onClick={handleClearAll}
-                className="flex items-center gap-1.5 px-3 py-2 bg-rose-50 text-rose-600 dark:bg-rose-950/40 rounded-xl hover:bg-rose-100 dark:hover:bg-rose-900"
+                className="flex items-center gap-1.5 px-3 py-2 bg-rose-950/40 text-rose-300 rounded-xl hover:bg-rose-900"
               >
                 <Trash2 size={16} /> {t.deleteAll}
               </button>
@@ -400,10 +474,10 @@ export default function App() {
 
         {/* Quick Filter Navigation Bar */}
         <div className="flex items-center gap-2 overflow-x-auto pb-1 no-scrollbar">
-          {isFiltered && (
+          {isViewingSubpage && (
             <button
               onClick={resetFilters}
-              className="flex items-center gap-1.5 px-3.5 py-2 bg-blue-50 dark:bg-slate-800 text-blue-700 dark:text-blue-300 rounded-xl text-sm font-semibold border border-blue-200 dark:border-slate-700 shrink-0 active:scale-95"
+              className="flex items-center gap-1.5 px-3.5 py-2 bg-blue-900/60 text-blue-200 rounded-xl text-sm font-semibold border border-blue-700 shrink-0 active:scale-95"
             >
               <ArrowLeft size={16} /> {t.showAll}
             </button>
@@ -417,7 +491,7 @@ export default function App() {
             className={`flex items-center gap-2 px-4 py-2 rounded-xl text-sm font-semibold transition-all shadow-sm shrink-0 ${
               showLikedOnly 
                 ? 'bg-rose-600 text-white' 
-                : 'bg-white dark:bg-slate-900 border border-slate-200 dark:border-slate-800 text-slate-700 dark:text-slate-300'
+                : 'bg-slate-900 border border-slate-800 text-slate-300'
             }`}
           >
             <Heart size={16} className={showLikedOnly ? 'fill-white' : 'text-rose-500'} />
@@ -425,41 +499,35 @@ export default function App() {
           </button>
         </div>
 
-        {/* Responsive Alphabet Grid */}
-        {!showLikedOnly && (
-          <div className="bg-white dark:bg-slate-900 p-3.5 sm:p-5 rounded-2xl shadow-sm border border-slate-200 dark:border-slate-800 space-y-3">
+        {/* ============================================================== */}
+        {/* SCREEN 1: ALPHABET GRID (Hides completely when letter is clicked) */}
+        {/* ============================================================== */}
+        {!isViewingSubpage && (
+          <div className="bg-slate-900 p-4 sm:p-5 rounded-2xl shadow-sm border border-slate-800 space-y-4">
             <h2 className="text-xs uppercase font-bold text-slate-400 tracking-wider">
               {t.alphabetTitle}
             </h2>
 
-            {/* Vowels */}
-            <div className="grid grid-cols-5 sm:grid-cols-8 md:grid-cols-10 lg:grid-cols-15 gap-1.5 sm:gap-2">
+            {/* Telugu Vowels */}
+            <div className="grid grid-cols-5 sm:grid-cols-8 md:grid-cols-10 lg:grid-cols-15 gap-2">
               {TELUGU_VOWELS.map((letter) => (
                 <button
                   key={letter}
-                  onClick={() => setSelectedLetter(selectedLetter === letter ? null : letter)}
-                  className={`h-11 sm:h-12 rounded-xl text-lg sm:text-xl font-bold flex items-center justify-center transition-all ${
-                    selectedLetter === letter
-                      ? 'bg-blue-700 text-white shadow-md scale-105'
-                      : 'bg-slate-100 dark:bg-slate-800 hover:bg-slate-200 dark:hover:bg-slate-700'
-                  }`}
+                  onClick={() => setSelectedLetter(letter)}
+                  className="h-12 rounded-xl text-xl font-bold flex items-center justify-center transition-all bg-slate-800/80 hover:bg-blue-600 text-slate-100 hover:text-white active:scale-95 border border-slate-700/50 hover:border-blue-500 shadow-sm"
                 >
                   {letter}
                 </button>
               ))}
             </div>
 
-            {/* Consonants */}
-            <div className="pt-2 border-t border-slate-100 dark:border-slate-800 grid grid-cols-5 sm:grid-cols-8 md:grid-cols-10 lg:grid-cols-15 gap-1.5 sm:gap-2">
+            {/* Telugu Consonants */}
+            <div className="pt-3 border-t border-slate-800 grid grid-cols-5 sm:grid-cols-8 md:grid-cols-10 lg:grid-cols-15 gap-2">
               {TELUGU_CONSONANTS.map((letter) => (
                 <button
                   key={letter}
-                  onClick={() => setSelectedLetter(selectedLetter === letter ? null : letter)}
-                  className={`h-11 sm:h-12 rounded-xl text-base sm:text-lg font-bold flex items-center justify-center transition-all ${
-                    selectedLetter === letter
-                      ? 'bg-blue-700 text-white shadow-md scale-105'
-                      : 'bg-slate-50 dark:bg-slate-800/60 hover:bg-slate-200 dark:hover:bg-slate-700 text-slate-800 dark:text-slate-200'
-                  }`}
+                  onClick={() => setSelectedLetter(letter)}
+                  className="h-12 rounded-xl text-lg font-bold flex items-center justify-center transition-all bg-slate-800/60 hover:bg-blue-600 text-slate-200 hover:text-white active:scale-95 border border-slate-700/50 hover:border-blue-500 shadow-sm"
                 >
                   {letter}
                 </button>
@@ -468,94 +536,95 @@ export default function App() {
           </div>
         )}
 
-        {/* Section Title */}
-        <div className="flex items-center justify-between text-sm sm:text-base font-medium text-slate-600 dark:text-slate-400 px-1">
-          <span>
-            {showLikedOnly 
-              ? t.likedSongs 
-              : selectedLetter 
-                ? t.songsStartingWith.replace('{letter}', selectedLetter)
-                : t.allSongs} ({filteredSongs.length})
-          </span>
-        </div>
-
-        {/* Responsive Grid for Songs */}
-        {filteredSongs.length > 0 ? (
-          <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-3 sm:gap-4">
-            {filteredSongs.map((song) => (
-              <div
-                key={song.id}
-                className="bg-white dark:bg-slate-900 border border-slate-200 dark:border-slate-800 rounded-2xl p-4 flex items-center justify-between gap-3 shadow-sm hover:border-blue-400 transition-all hover:shadow"
+        {/* ============================================================== */}
+        {/* SCREEN 2: DEDICATED SONGS LIST FOR SELECTED LETTER OR SEARCH  */}
+        {/* ============================================================== */}
+        {isViewingSubpage && (
+          <div className="space-y-4">
+            <div className="flex items-center justify-between text-base font-semibold text-slate-300 px-1">
+              <span>
+                {showLikedOnly 
+                  ? `${t.likedSongs} (${filteredSongs.length})` 
+                  : selectedLetter 
+                    ? `${t.songsStartingWith.replace('{letter}', selectedLetter)} (${filteredSongs.length})`
+                    : `Search Results (${filteredSongs.length})`}
+              </span>
+              <button 
+                onClick={resetFilters} 
+                className="text-xs text-blue-400 hover:underline flex items-center gap-1"
               >
-                <div 
-                  className="flex-1 cursor-pointer truncate"
-                  onClick={() => setDetailSong(song)}
-                >
-                  <h3 className="text-base sm:text-lg font-bold text-slate-800 dark:text-slate-100 truncate">
-                    🎵 {song.title}
-                  </h3>
-                  {song.singer && (
-                    <p className="text-xs text-slate-400 truncate mt-0.5">{song.singer}</p>
-                  )}
-                </div>
+                <ArrowLeft size={14} /> Back to Letters
+              </button>
+            </div>
 
-                <div className="flex items-center gap-1 sm:gap-1.5 shrink-0">
-                  {/* Quick Edit */}
-                  <button
-                    onClick={() => handleOpenEdit(song)}
-                    className="p-2 rounded-full hover:bg-slate-100 dark:hover:bg-slate-800 text-slate-400 hover:text-slate-600 dark:hover:text-slate-200 active:scale-90"
-                    title={t.edit}
+            {filteredSongs.length > 0 ? (
+              <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-3">
+                {filteredSongs.map((song) => (
+                  <div
+                    key={song.id}
+                    className="bg-slate-900 border border-slate-800 hover:border-blue-500 rounded-2xl p-4 flex items-center justify-between gap-3 shadow-sm transition-all"
                   >
-                    <Edit3 size={17} />
-                  </button>
+                    {/* Clicking song opens Lyrics and plays automatically */}
+                    <div 
+                      className="flex-1 cursor-pointer truncate"
+                      onClick={() => handleSelectSong(song)}
+                    >
+                      <h3 className="text-base sm:text-lg font-bold text-slate-100 truncate">
+                        🎵 {song.title}
+                      </h3>
+                      {song.singer && (
+                        <p className="text-xs text-slate-400 truncate mt-0.5">{song.singer}</p>
+                      )}
+                    </div>
 
-                  {/* Like Button */}
-                  <button
-                    onClick={() => handleToggleLike(song.id)}
-                    className="p-2 rounded-full hover:bg-slate-100 dark:hover:bg-slate-800 active:scale-90"
-                    aria-label="Like"
-                  >
-                    <Heart
-                      size={19}
-                      className={song.liked ? 'fill-rose-500 text-rose-500' : 'text-slate-400'}
-                    />
-                  </button>
+                    <div className="flex items-center gap-1.5 shrink-0">
+                      {/* Edit */}
+                      <button
+                        onClick={() => handleOpenEdit(song)}
+                        className="p-2 rounded-full hover:bg-slate-800 text-slate-400 hover:text-slate-200 active:scale-90"
+                        title={t.edit}
+                      >
+                        <Edit3 size={17} />
+                      </button>
 
-                  {/* Play Button */}
-                  <button
-                    onClick={() => setActiveSong(song)}
-                    className="p-2 sm:p-2.5 bg-blue-50 dark:bg-blue-950/50 text-blue-700 dark:text-blue-400 hover:bg-blue-100 dark:hover:bg-blue-900 rounded-full active:scale-95"
-                    aria-label="Play"
-                  >
-                    <Play size={18} className="fill-current ml-0.5" />
-                  </button>
-                </div>
+                      {/* Like */}
+                      <button
+                        onClick={() => handleToggleLike(song.id)}
+                        className="p-2 rounded-full hover:bg-slate-800 active:scale-90"
+                        aria-label="Like"
+                      >
+                        <Heart
+                          size={19}
+                          className={song.liked ? 'fill-rose-500 text-rose-500' : 'text-slate-500'}
+                        />
+                      </button>
+
+                      {/* Play Button */}
+                      <button
+                        onClick={() => handleSelectSong(song)}
+                        className="p-2.5 bg-blue-950/70 text-blue-400 hover:bg-blue-900 hover:text-white rounded-full active:scale-95 border border-blue-800"
+                        aria-label="Play"
+                      >
+                        <Play size={18} className="fill-current ml-0.5" />
+                      </button>
+                    </div>
+                  </div>
+                ))}
               </div>
-            ))}
-          </div>
-        ) : (
-          <div className="text-center py-16 bg-white dark:bg-slate-900 rounded-2xl border border-dashed border-slate-200 dark:border-slate-800 p-6">
-            <Music size={40} className="mx-auto text-slate-300 mb-3" />
-            <p className="text-slate-500 font-medium">{t.noSongs}</p>
-            <p className="text-xs text-slate-400 mt-1">{t.addHint}</p>
+            ) : (
+              <div className="text-center py-16 bg-slate-900 rounded-2xl border border-dashed border-slate-800 p-6">
+                <Music size={40} className="mx-auto text-slate-600 mb-3" />
+                <p className="text-slate-400 font-medium">{t.noSongs}</p>
+                <p className="text-xs text-slate-500 mt-1">{t.addHint}</p>
+              </div>
+            )}
           </div>
         )}
       </main>
 
-      {/* Add / Edit Modal */}
-      {showFormModal && (
-        <SongFormModal 
-          initialData={songToEdit}
-          onClose={() => {
-            setShowFormModal(false);
-            setSongToEdit(null);
-          }} 
-          onSave={handleSaveSong}
-          t={t}
-        />
-      )}
-
-      {/* Song Details Modal */}
+      {/* ============================================================== */}
+      {/* SCREEN 3: DEDICATED SONG VIEW (Lyrics + Controls + Bottom Player) */}
+      {/* ============================================================== */}
       {detailSong && (
         <SongDetailsModal
           song={detailSong}
@@ -564,6 +633,19 @@ export default function App() {
           onToggleLike={handleToggleLike}
           onEdit={handleOpenEdit}
           onDelete={handleDeleteSong}
+          t={t}
+        />
+      )}
+
+      {/* Add / Edit Song Modal */}
+      {showFormModal && (
+        <SongFormModal 
+          initialData={songToEdit}
+          onClose={() => {
+            setShowFormModal(false);
+            setSongToEdit(null);
+          }} 
+          onSave={handleSaveSong}
           t={t}
         />
       )}
