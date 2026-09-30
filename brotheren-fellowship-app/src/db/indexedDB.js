@@ -1,7 +1,7 @@
 import { openDB } from 'idb';
 
 const DB_NAME = 'brotheren_fellowship_db';
-const DB_VERSION = 4; // Bumped version
+const DB_VERSION = 5;
 
 export async function initDB() {
   return openDB(DB_NAME, DB_VERSION, {
@@ -22,7 +22,6 @@ export async function initDB() {
   });
 }
 
-// Telugu characters
 export const TELUGU_VOWELS = [
   'అ', 'ఆ', 'ఇ', 'ఈ', 'ఉ', 'ఊ', 'ఋ', 'ఎ', 'ఏ', 'ఐ', 'ఒ', 'ఓ', 'ఔ', 'అం', 'అః'
 ];
@@ -51,23 +50,21 @@ export function extractStartingTeluguLetter(title = '') {
   return matched || firstChar;
 }
 
-// Safe string ID key normalization
-const normalizeId = (id) => String(id);
-
-// --- Binary Audio Cache in IndexedDB ---
+// --- Audio Blob Offline Storage ---
 export async function saveAudioBlobToCache(songId, blob) {
   if (!songId || !blob) return false;
   try {
     const db = await initDB();
-    await db.put('audioFiles', { 
-      id: normalizeId(songId), 
-      blob, 
-      size: blob.size, 
-      cachedAt: Date.now() 
-    });
+    // Save both numeric and string versions to eliminate lookup mismatches
+    const idStr = String(songId);
+    await db.put('audioFiles', { id: idStr, blob, cachedAt: Date.now() });
+    const idNum = Number(songId);
+    if (!isNaN(idNum)) {
+      await db.put('audioFiles', { id: idNum, blob, cachedAt: Date.now() });
+    }
     return true;
   } catch (err) {
-    console.error('Failed to cache audio in IndexedDB:', err);
+    console.error('Error saving audio blob to IndexedDB:', err);
     return false;
   }
 }
@@ -76,10 +73,19 @@ export async function getCachedAudioBlob(songId) {
   if (!songId) return null;
   try {
     const db = await initDB();
-    const record = await db.get('audioFiles', normalizeId(songId));
-    return record?.blob || null;
+    // Try string format
+    let record = await db.get('audioFiles', String(songId));
+    if (record?.blob) return record.blob;
+
+    // Try number format
+    const idNum = Number(songId);
+    if (!isNaN(idNum)) {
+      record = await db.get('audioFiles', idNum);
+      if (record?.blob) return record.blob;
+    }
+    return null;
   } catch (err) {
-    console.error('Failed to get cached audio blob:', err);
+    console.error('Error fetching cached audio blob:', err);
     return null;
   }
 }
@@ -94,13 +100,6 @@ export async function getAllCachedAudioIds() {
   }
 }
 
-export async function removeAudioBlobFromCache(songId) {
-  try {
-    const db = await initDB();
-    await db.delete('audioFiles', normalizeId(songId));
-  } catch (err) {}
-}
-
 // --- Songs Metadata Cache ---
 export async function saveSongsOfflineCache(songs) {
   if (!Array.isArray(songs)) return;
@@ -108,10 +107,7 @@ export async function saveSongsOfflineCache(songs) {
   const tx = db.transaction('songs', 'readwrite');
   await tx.store.clear();
   for (const song of songs) {
-    await tx.store.put({
-      ...song,
-      id: normalizeId(song.id)
-    });
+    await tx.store.put(song);
   }
   await tx.done;
 }
@@ -127,8 +123,11 @@ export async function getOfflineSongsCache() {
 
 export async function deleteSong(id) {
   const db = await initDB();
-  await db.delete('audioFiles', normalizeId(id));
-  return await db.delete('songs', normalizeId(id));
+  try {
+    await db.delete('audioFiles', String(id));
+    await db.delete('audioFiles', Number(id));
+  } catch (e) {}
+  return await db.delete('songs', id);
 }
 
 export async function clearAllSongs() {
