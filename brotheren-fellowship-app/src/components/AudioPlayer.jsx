@@ -1,5 +1,6 @@
 ﻿import React, { useRef, useEffect, useState } from 'react';
-import { Play, Pause, SkipBack, SkipForward, Volume2, X } from 'lucide-react';
+import { Play, Pause, SkipBack, SkipForward, Volume2, X, DownloadCloud } from 'lucide-react';
+import { getCachedAudioBlob, saveAudioBlobToCache } from '../db/indexedDB';
 
 export default function AudioPlayer({ 
   currentSong, 
@@ -14,37 +15,69 @@ export default function AudioPlayer({
   const [currentTime, setCurrentTime] = useState(0);
   const [duration, setDuration] = useState(0);
   const [audioUrl, setAudioUrl] = useState(null);
+  const [isCachedOffline, setIsCachedOffline] = useState(false);
 
-  // Handle both cloud HTTPS URLs (Supabase) and local Blobs
+  // Load and cache audio locally for complete offline playback
   useEffect(() => {
     let objectUrl = null;
+    let isCancelled = false;
 
-    if (!currentSong) {
-      setAudioUrl(null);
-      setIsPlaying(false);
-      return;
-    }
+    async function prepareAudio() {
+      if (!currentSong) {
+        setAudioUrl(null);
+        setIsPlaying(false);
+        setIsCachedOffline(false);
+        return;
+      }
 
-    // 1. If it's a Supabase/web URL string
-    if (typeof currentSong.audioUrl === 'string' && currentSong.audioUrl.startsWith('http')) {
-      setAudioUrl(currentSong.audioUrl);
-    } 
-    // 2. If it's a local Blob / File object
-    else if (currentSong.audioBlob instanceof Blob || currentSong.audioBlob instanceof File) {
-      objectUrl = URL.createObjectURL(currentSong.audioBlob);
-      setAudioUrl(objectUrl);
-    } 
-    // 3. Fallback if audioBlob itself is an HTTPS string
-    else if (typeof currentSong.audioBlob === 'string' && currentSong.audioBlob.startsWith('http')) {
-      setAudioUrl(currentSong.audioBlob);
-    } else {
-      setAudioUrl(null);
+      // 1. Direct Blob / File object
+      if (currentSong.audioBlob instanceof Blob || currentSong.audioBlob instanceof File) {
+        objectUrl = URL.createObjectURL(currentSong.audioBlob);
+        setAudioUrl(objectUrl);
+        setIsCachedOffline(true);
+        return;
+      }
+
+      // 2. Check local IndexedDB offline storage
+      const cachedBlob = await getCachedAudioBlob(currentSong.id);
+      if (cachedBlob && !isCancelled) {
+        objectUrl = URL.createObjectURL(cachedBlob);
+        setAudioUrl(objectUrl);
+        setIsCachedOffline(true);
+        return;
+      }
+
+      // 3. Cloud URL (Supabase storage)
+      const cloudUrl = currentSong.audioUrl || (typeof currentSong.audioBlob === 'string' ? currentSong.audioBlob : null);
+
+      if (cloudUrl && typeof cloudUrl === 'string' && cloudUrl.startsWith('http')) {
+        setAudioUrl(cloudUrl);
+        setIsCachedOffline(false);
+
+        // If online, fetch in background and save as Blob to IndexedDB for future offline playback
+        if (navigator.onLine) {
+          fetch(cloudUrl)
+            .then(res => res.blob())
+            .then(blob => {
+              if (!isCancelled && blob.size > 0) {
+                saveAudioBlobToCache(currentSong.id, blob);
+                setIsCachedOffline(true);
+              }
+            })
+            .catch(err => console.warn('Could not pre-cache audio blob offline:', err));
+        }
+      } else {
+        setAudioUrl(null);
+        setIsCachedOffline(false);
+      }
     }
 
     setCurrentTime(0);
     setDuration(0);
+    prepareAudio();
 
     return () => {
+      isCancelled = true;
       if (objectUrl) {
         URL.revokeObjectURL(objectUrl);
       }
@@ -122,15 +155,20 @@ export default function AudioPlayer({
       <div className="max-w-4xl mx-auto flex flex-col gap-2">
         <div className="flex items-center justify-between">
           <div className="flex-1 truncate pr-4">
-            <h4 className="font-semibold text-base sm:text-lg text-emerald-400 truncate">
-              🎵 {currentSong.title}
+            <h4 className="font-semibold text-base sm:text-lg text-emerald-400 truncate flex items-center gap-1.5">
+              <span>🎵 {currentSong.title}</span>
+              {isCachedOffline && (
+                <span className="text-[10px] bg-emerald-950/80 text-emerald-300 border border-emerald-700/50 px-1.5 py-0.5 rounded-md font-normal">
+                  Offline Ready
+                </span>
+              )}
             </h4>
             {currentSong.singer && (
               <p className="text-xs text-slate-400 truncate">{currentSong.singer}</p>
             )}
             {!audioUrl && (
               <p className="text-xs text-amber-400/90 font-medium mt-0.5">
-                (ఆడియో ఫైల్ లేదు / No audio attached)
+                (ఆడియో ఫైల్ లేదు / No audio available offline)
               </p>
             )}
           </div>

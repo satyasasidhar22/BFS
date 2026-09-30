@@ -1,7 +1,7 @@
 import { openDB } from 'idb';
 
 const DB_NAME = 'brotheren_fellowship_db';
-const DB_VERSION = 2;
+const DB_VERSION = 3;
 
 export async function initDB() {
   return openDB(DB_NAME, DB_VERSION, {
@@ -14,6 +14,10 @@ export async function initDB() {
       }
       if (!db.objectStoreNames.contains('settings')) {
         db.createObjectStore('settings', { keyPath: 'key' });
+      }
+      // Binary blob storage for offline audio files
+      if (!db.objectStoreNames.contains('audioFiles')) {
+        db.createObjectStore('audioFiles', { keyPath: 'id' });
       }
     },
   });
@@ -50,7 +54,34 @@ export function extractStartingTeluguLetter(title = '') {
   return matched || firstChar;
 }
 
-// Offline Caching Bridge
+// --- Audio Blob Offline Storage ---
+export async function saveAudioBlobToCache(songId, blob) {
+  if (!songId || !blob) return;
+  try {
+    const db = await initDB();
+    await db.put('audioFiles', { 
+      id: Number(songId), 
+      blob, 
+      cachedAt: new Date().toISOString() 
+    });
+  } catch (err) {
+    console.error('Failed to store audio in offline cache:', err);
+  }
+}
+
+export async function getCachedAudioBlob(songId) {
+  if (!songId) return null;
+  try {
+    const db = await initDB();
+    const record = await db.get('audioFiles', Number(songId));
+    return record?.blob || null;
+  } catch (err) {
+    console.error('Failed to retrieve cached audio blob:', err);
+    return null;
+  }
+}
+
+// --- Offline Songs List Cache ---
 export async function saveSongsOfflineCache(songs) {
   if (!Array.isArray(songs)) return;
   const db = await initDB();
@@ -80,7 +111,7 @@ export async function getAllSongs() {
 
 export async function getSongById(id) {
   const db = await initDB();
-  return await db.get('songs', id);
+  return await db.get('songs', Number(id));
 }
 
 export async function addSong(songData) {
@@ -98,7 +129,7 @@ export async function addSong(songData) {
 
 export async function updateSong(id, changes) {
   const db = await initDB();
-  const existing = await db.get('songs', id);
+  const existing = await db.get('songs', Number(id));
   if (!existing) throw new Error("Song not found");
   const updated = {
     ...existing,
@@ -111,7 +142,7 @@ export async function updateSong(id, changes) {
 
 export async function toggleLikeSong(id) {
   const db = await initDB();
-  const song = await db.get('songs', id);
+  const song = await db.get('songs', Number(id));
   if (song) {
     song.liked = !song.liked;
     song.updatedAt = new Date().toISOString();
@@ -123,11 +154,13 @@ export async function toggleLikeSong(id) {
 
 export async function deleteSong(id) {
   const db = await initDB();
-  return await db.delete('songs', id);
+  await db.delete('audioFiles', Number(id));
+  return await db.delete('songs', Number(id));
 }
 
 export async function clearAllSongs() {
   const db = await initDB();
+  await db.clear('audioFiles');
   return await db.clear('songs');
 }
 
