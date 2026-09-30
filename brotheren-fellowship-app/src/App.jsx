@@ -1,13 +1,15 @@
 ﻿import React, { useState, useEffect, useMemo, useRef } from 'react';
 import { 
   Heart, Search, PlusCircle, Settings, Play, Music, Download, Upload, Trash2, 
-  BookOpen, Globe, ArrowLeft, Edit3, WifiOff
+  BookOpen, Globe, ArrowLeft, Edit3, WifiOff, Check, DownloadCloud, Loader2
 } from 'lucide-react';
 import { 
   TELUGU_VOWELS, 
   TELUGU_CONSONANTS, 
   saveSongsOfflineCache, 
-  getOfflineSongsCache 
+  getOfflineSongsCache,
+  saveAudioBlobToCache,
+  getAllCachedAudioIds
 } from './db/indexedDB';
 import { supabase } from './supabaseClient';
 import { translations } from './utils/translations';
@@ -24,7 +26,9 @@ export default function App() {
   const [activeSong, setActiveSong] = useState(null);
   const [detailSong, setDetailSong] = useState(null);
   const [isOnline, setIsOnline] = useState(navigator.onLine);
-  
+  const [downloadedIds, setDownloadedIds] = useState(new Set());
+  const [downloadingId, setDownloadingId] = useState(null);
+
   // Modals
   const [showFormModal, setShowFormModal] = useState(false);
   const [songToEdit, setSongToEdit] = useState(null);
@@ -40,6 +44,16 @@ export default function App() {
     setLang(newLang);
     localStorage.setItem('app_lang', newLang);
   };
+
+  // Refresh set of songs with downloaded offline audio in IndexedDB
+  const refreshDownloadedSet = async () => {
+    const ids = await getAllCachedAudioIds();
+    setDownloadedIds(ids);
+  };
+
+  useEffect(() => {
+    refreshDownloadedSet();
+  }, []);
 
   // Hardware / Gesture Back Navigation handler
   useEffect(() => {
@@ -67,6 +81,7 @@ export default function App() {
     const handleOnline = () => {
       setIsOnline(true);
       reloadSongs();
+      refreshDownloadedSet();
     };
     const handleOffline = () => setIsOnline(false);
 
@@ -97,7 +112,7 @@ export default function App() {
 
       if (data) {
         const normalizedSongs = data.map(item => ({
-          id: item.id,
+          id: String(item.id),
           title: item.title,
           startingLetter: item.starting_letter,
           lyrics: item.lyrics,
@@ -167,10 +182,30 @@ export default function App() {
     return result;
   }, [songs, showLikedOnly, selectedLetter, searchQuery]);
 
+  // Download song audio to IndexedDB for guaranteed offline playback
+  const handleDownloadSongOffline = async (e, song) => {
+    e.stopPropagation();
+    const url = song.audioUrl || (typeof song.audioBlob === 'string' ? song.audioBlob : null);
+    if (!url || !url.startsWith('http')) return;
+
+    setDownloadingId(String(song.id));
+    try {
+      const res = await fetch(url);
+      if (!res.ok) throw new Error('Download failed');
+      const blob = await res.blob();
+      await saveAudioBlobToCache(song.id, blob);
+      await refreshDownloadedSet();
+    } catch (err) {
+      alert('Could not download audio. Please check internet connection.');
+    } finally {
+      setDownloadingId(null);
+    }
+  };
+
   // Audio Player Next / Prev
   const handleNextSong = () => {
     if (!activeSong || filteredSongs.length === 0) return;
-    const currentIndex = filteredSongs.findIndex(s => s.id === activeSong.id);
+    const currentIndex = filteredSongs.findIndex(s => String(s.id) === String(activeSong.id));
     if (currentIndex !== -1 && currentIndex < filteredSongs.length - 1) {
       const next = filteredSongs[currentIndex + 1];
       setActiveSong(next);
@@ -180,7 +215,7 @@ export default function App() {
 
   const handlePrevSong = () => {
     if (!activeSong || filteredSongs.length === 0) return;
-    const currentIndex = filteredSongs.findIndex(s => s.id === activeSong.id);
+    const currentIndex = filteredSongs.findIndex(s => String(s.id) === String(activeSong.id));
     if (currentIndex > 0) {
       const prev = filteredSongs[currentIndex - 1];
       setActiveSong(prev);
@@ -213,15 +248,15 @@ export default function App() {
 
   // Like Toggle in Cloud & Local Cache
   const handleToggleLike = async (id) => {
-    const target = songs.find(s => s.id === id);
+    const target = songs.find(s => String(s.id) === String(id));
     if (!target) return;
     const newLikedStatus = !target.liked;
 
-    const updatedSongs = songs.map(s => s.id === id ? { ...s, liked: newLikedStatus } : s);
+    const updatedSongs = songs.map(s => String(s.id) === String(id) ? { ...s, liked: newLikedStatus } : s);
     setSongs(updatedSongs);
     await saveSongsOfflineCache(updatedSongs);
 
-    if (detailSong && detailSong.id === id) {
+    if (detailSong && String(detailSong.id) === String(id)) {
       setDetailSong(prev => ({ ...prev, liked: newLikedStatus }));
     }
 
@@ -316,6 +351,7 @@ export default function App() {
       if (activeSong?.id === id) setActiveSong(null);
       if (detailSong?.id === id) setDetailSong(null);
       await reloadSongs();
+      await refreshDownloadedSet();
     }
   };
 
@@ -375,6 +411,7 @@ export default function App() {
       setActiveSong(null);
       setDetailSong(null);
       await reloadSongs();
+      await refreshDownloadedSet();
     }
   };
 
@@ -509,7 +546,7 @@ export default function App() {
           </div>
         )}
 
-        {/* Quick Nav: Show All / Liked Songs */}
+        {/* Quick Filter Navigation Bar */}
         <div className="flex items-center gap-2 overflow-x-auto pb-1 no-scrollbar">
           {isViewingSubpage && (
             <button
@@ -593,56 +630,89 @@ export default function App() {
 
             {filteredSongs.length > 0 ? (
               <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-3">
-                {filteredSongs.map((song) => (
-                  <div
-                    key={song.id}
-                    className="bg-slate-900 border border-slate-800 hover:border-blue-500 rounded-2xl p-4 flex items-center justify-between gap-3 shadow-sm transition-all"
-                  >
-                    <div 
-                      className="flex-1 cursor-pointer truncate"
-                      onClick={() => handleSelectSong(song)}
+                {filteredSongs.map((song) => {
+                  const isDownloaded = downloadedIds.has(String(song.id));
+                  const isDownloading = downloadingId === String(song.id);
+                  const hasAudio = Boolean(song.audioUrl || (typeof song.audioBlob === 'string' && song.audioBlob.startsWith('http')));
+
+                  return (
+                    <div
+                      key={song.id}
+                      className="bg-slate-900 border border-slate-800 hover:border-blue-500 rounded-2xl p-4 flex items-center justify-between gap-3 shadow-sm transition-all"
                     >
-                      <h3 className="text-base sm:text-lg font-bold text-slate-100 truncate">
-                        🎵 {song.title}
-                      </h3>
-                      {song.singer && (
-                        <p className="text-xs text-slate-400 truncate mt-0.5">{song.singer}</p>
-                      )}
+                      <div 
+                        className="flex-1 cursor-pointer truncate"
+                        onClick={() => handleSelectSong(song)}
+                      >
+                        <h3 className="text-base sm:text-lg font-bold text-slate-100 truncate flex items-center gap-1.5">
+                          <span>🎵 {song.title}</span>
+                          {isDownloaded && (
+                            <span className="text-[10px] bg-emerald-950 text-emerald-400 border border-emerald-700/50 px-1.5 py-0.2 rounded font-normal shrink-0">
+                              ✓ Offline
+                            </span>
+                          )}
+                        </h3>
+                        {song.singer && (
+                          <p className="text-xs text-slate-400 truncate mt-0.5">{song.singer}</p>
+                        )}
+                      </div>
+
+                      <div className="flex items-center gap-1.5 shrink-0">
+                        {/* Offline Download Button */}
+                        {hasAudio && (
+                          <button
+                            onClick={(e) => handleDownloadSongOffline(e, song)}
+                            disabled={isDownloaded || isDownloading}
+                            className={`p-2 rounded-full active:scale-90 transition-colors ${
+                              isDownloaded 
+                                ? 'text-emerald-400 cursor-default' 
+                                : 'text-slate-400 hover:text-white hover:bg-slate-800'
+                            }`}
+                            title={isDownloaded ? 'Downloaded Offline' : 'Download for Offline'}
+                          >
+                            {isDownloading ? (
+                              <Loader2 size={17} className="animate-spin text-amber-400" />
+                            ) : isDownloaded ? (
+                              <Check size={17} />
+                            ) : (
+                              <DownloadCloud size={17} />
+                            )}
+                          </button>
+                        )}
+
+                        {/* Edit */}
+                        <button
+                          onClick={() => handleOpenEdit(song)}
+                          className="p-2 rounded-full hover:bg-slate-800 text-slate-400 hover:text-slate-200 active:scale-90"
+                          title={t.edit}
+                        >
+                          <Edit3 size={17} />
+                        </button>
+
+                        {/* Like */}
+                        <button
+                          onClick={() => handleToggleLike(song.id)}
+                          className="p-2 rounded-full hover:bg-slate-800 active:scale-90"
+                          aria-label="Like"
+                        >
+                          <Heart
+                            size={19}
+                            className={song.liked ? 'fill-rose-500 text-rose-500' : 'text-slate-500'}
+                          />
+                        </button>
+
+                        {/* Play Button */}
+                        <button
+                          onClick={(e) => handlePlaySong(e, song)}
+                          className="p-2.5 bg-blue-950/70 text-blue-400 hover:bg-blue-900 hover:text-white rounded-full active:scale-95 border border-blue-800"
+                          aria-label="Play"
+                        >
+                          <Play size={18} className="fill-current ml-0.5" />
+                        </button>
+                      </div>
                     </div>
-
-                    <div className="flex items-center gap-1.5 shrink-0">
-                      {/* Edit */}
-                      <button
-                        onClick={() => handleOpenEdit(song)}
-                        className="p-2 rounded-full hover:bg-slate-800 text-slate-400 hover:text-slate-200 active:scale-90"
-                        title={t.edit}
-                      >
-                        <Edit3 size={17} />
-                      </button>
-
-                      {/* Like */}
-                      <button
-                        onClick={() => handleToggleLike(song.id)}
-                        className="p-2 rounded-full hover:bg-slate-800 active:scale-90"
-                        aria-label="Like"
-                      >
-                        <Heart
-                          size={19}
-                          className={song.liked ? 'fill-rose-500 text-rose-500' : 'text-slate-500'}
-                        />
-                      </button>
-
-                      {/* Explicit Play Button */}
-                      <button
-                        onClick={(e) => handlePlaySong(e, song)}
-                        className="p-2.5 bg-blue-950/70 text-blue-400 hover:bg-blue-900 hover:text-white rounded-full active:scale-95 border border-blue-800"
-                        aria-label="Play"
-                      >
-                        <Play size={18} className="fill-current ml-0.5" />
-                      </button>
-                    </div>
-                  </div>
-                ))}
+                  );
+                })}
               </div>
             ) : (
               <div className="text-center py-16 bg-slate-900 rounded-2xl border border-dashed border-slate-800 p-6">

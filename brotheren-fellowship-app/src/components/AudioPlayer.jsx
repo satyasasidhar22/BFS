@@ -1,5 +1,5 @@
 ﻿import React, { useRef, useEffect, useState } from 'react';
-import { Play, Pause, SkipBack, SkipForward, Volume2, X, DownloadCloud } from 'lucide-react';
+import { Play, Pause, SkipBack, SkipForward, X, CheckCircle2 } from 'lucide-react';
 import { getCachedAudioBlob, saveAudioBlobToCache } from '../db/indexedDB';
 
 export default function AudioPlayer({ 
@@ -15,123 +15,109 @@ export default function AudioPlayer({
   const [currentTime, setCurrentTime] = useState(0);
   const [duration, setDuration] = useState(0);
   const [audioUrl, setAudioUrl] = useState(null);
-  const [isCachedOffline, setIsCachedOffline] = useState(false);
+  const [isOfflineReady, setIsOfflineReady] = useState(false);
+  const [loadError, setLoadError] = useState(false);
 
-  // Load and cache audio locally for complete offline playback
   useEffect(() => {
     let objectUrl = null;
     let isCancelled = false;
 
-    async function prepareAudio() {
+    async function loadAudio() {
+      setLoadError(false);
+      setIsPlaying(false);
+      setCurrentTime(0);
+      setDuration(0);
+
       if (!currentSong) {
         setAudioUrl(null);
-        setIsPlaying(false);
-        setIsCachedOffline(false);
         return;
       }
 
-      // 1. Direct Blob / File object
-      if (currentSong.audioBlob instanceof Blob || currentSong.audioBlob instanceof File) {
+      // 1. Direct Blob / File
+      if (currentSong.audioBlob instanceof Blob) {
         objectUrl = URL.createObjectURL(currentSong.audioBlob);
         setAudioUrl(objectUrl);
-        setIsCachedOffline(true);
+        setIsOfflineReady(true);
         return;
       }
 
-      // 2. Check local IndexedDB offline storage
+      // 2. Check IndexedDB offline cache
       const cachedBlob = await getCachedAudioBlob(currentSong.id);
-      if (cachedBlob && !isCancelled) {
+      if (cachedBlob && cachedBlob.size > 0) {
         objectUrl = URL.createObjectURL(cachedBlob);
         setAudioUrl(objectUrl);
-        setIsCachedOffline(true);
+        setIsOfflineReady(true);
         return;
       }
 
-      // 3. Cloud URL (Supabase storage)
-      const cloudUrl = currentSong.audioUrl || (typeof currentSong.audioBlob === 'string' ? currentSong.audioBlob : null);
+      // 3. Fallback to Cloud URL if connected online
+      const remoteUrl = currentSong.audioUrl || (typeof currentSong.audioBlob === 'string' ? currentSong.audioBlob : null);
 
-      if (cloudUrl && typeof cloudUrl === 'string' && cloudUrl.startsWith('http')) {
-        setAudioUrl(cloudUrl);
-        setIsCachedOffline(false);
+      if (remoteUrl && typeof remoteUrl === 'string' && remoteUrl.startsWith('http')) {
+        setAudioUrl(remoteUrl);
+        setIsOfflineReady(false);
 
-        // If online, fetch in background and save as Blob to IndexedDB for future offline playback
+        // Auto-download to IndexedDB in background if online
         if (navigator.onLine) {
-          fetch(cloudUrl)
-            .then(res => res.blob())
+          fetch(remoteUrl)
+            .then(res => {
+              if (!res.ok) throw new Error('Fetch failed');
+              return res.blob();
+            })
             .then(blob => {
               if (!isCancelled && blob.size > 0) {
                 saveAudioBlobToCache(currentSong.id, blob);
-                setIsCachedOffline(true);
+                setIsOfflineReady(true);
               }
             })
-            .catch(err => console.warn('Could not pre-cache audio blob offline:', err));
+            .catch(() => {});
         }
       } else {
         setAudioUrl(null);
-        setIsCachedOffline(false);
+        setLoadError(true);
       }
     }
 
-    setCurrentTime(0);
-    setDuration(0);
-    prepareAudio();
+    loadAudio();
 
     return () => {
       isCancelled = true;
-      if (objectUrl) {
-        URL.revokeObjectURL(objectUrl);
-      }
+      if (objectUrl) URL.revokeObjectURL(objectUrl);
     };
   }, [currentSong]);
 
-  // Keep screen awake while playing
   useEffect(() => {
-    if (isPlaying) {
-      requestWakeLock?.();
-    } else {
-      releaseWakeLock?.();
-    }
-    return () => {
-      releaseWakeLock?.();
-    };
+    if (isPlaying) requestWakeLock?.();
+    else releaseWakeLock?.();
+    return () => releaseWakeLock?.();
   }, [isPlaying, requestWakeLock, releaseWakeLock]);
 
   const togglePlay = () => {
     if (!audioRef.current || !audioUrl) return;
     if (isPlaying) {
       audioRef.current.pause();
+      setIsPlaying(false);
     } else {
-      audioRef.current.play().catch(console.error);
-    }
-    setIsPlaying(!isPlaying);
-  };
-
-  const handleTimeUpdate = () => {
-    if (audioRef.current) {
-      setCurrentTime(audioRef.current.currentTime);
+      audioRef.current.play()
+        .then(() => setIsPlaying(true))
+        .catch(() => {
+          setIsPlaying(false);
+          setLoadError(true);
+        });
     }
   };
 
   const handleLoadedMetadata = () => {
     if (audioRef.current) {
       setDuration(audioRef.current.duration);
-      audioRef.current
-        .play()
+      audioRef.current.play()
         .then(() => setIsPlaying(true))
         .catch(() => setIsPlaying(false));
     }
   };
 
-  const handleSeek = (e) => {
-    const time = Number(e.target.value);
-    if (audioRef.current) {
-      audioRef.current.currentTime = time;
-      setCurrentTime(time);
-    }
-  };
-
   const formatTime = (timeInSeconds) => {
-    if (isNaN(timeInSeconds)) return '00:00';
+    if (isNaN(timeInSeconds) || timeInSeconds <= 0) return '00:00';
     const mins = Math.floor(timeInSeconds / 60);
     const secs = Math.floor(timeInSeconds % 60);
     return `${mins.toString().padStart(2, '0')}:${secs.toString().padStart(2, '0')}`;
@@ -145,10 +131,14 @@ export default function AudioPlayer({
         <audio
           ref={audioRef}
           src={audioUrl}
-          onTimeUpdate={handleTimeUpdate}
+          preload="auto"
+          onTimeUpdate={() => audioRef.current && setCurrentTime(audioRef.current.currentTime)}
           onLoadedMetadata={handleLoadedMetadata}
           onEnded={onNext}
-          onError={() => setIsPlaying(false)}
+          onError={() => {
+            setIsPlaying(false);
+            setLoadError(true);
+          }}
         />
       )}
 
@@ -157,26 +147,19 @@ export default function AudioPlayer({
           <div className="flex-1 truncate pr-4">
             <h4 className="font-semibold text-base sm:text-lg text-emerald-400 truncate flex items-center gap-1.5">
               <span>🎵 {currentSong.title}</span>
-              {isCachedOffline && (
-                <span className="text-[10px] bg-emerald-950/80 text-emerald-300 border border-emerald-700/50 px-1.5 py-0.5 rounded-md font-normal">
-                  Offline Ready
+              {isOfflineReady && (
+                <span className="flex items-center gap-0.5 text-[10px] bg-emerald-950 text-emerald-300 border border-emerald-700/60 px-1.5 py-0.5 rounded">
+                  <CheckCircle2 size={10} /> Offline
                 </span>
               )}
             </h4>
-            {currentSong.singer && (
-              <p className="text-xs text-slate-400 truncate">{currentSong.singer}</p>
-            )}
-            {!audioUrl && (
-              <p className="text-xs text-amber-400/90 font-medium mt-0.5">
-                (ఆడియో ఫైల్ లేదు / No audio available offline)
+            {loadError && (
+              <p className="text-xs text-rose-400 font-medium">
+                ⚠️ ఆడియో అందుబాటులో లేదు (Download while online first)
               </p>
             )}
           </div>
-          <button 
-            onClick={onClose} 
-            className="p-1 hover:bg-slate-800 rounded-full text-slate-400"
-            aria-label="Close Player"
-          >
+          <button onClick={onClose} className="p-1 hover:bg-slate-800 rounded-full text-slate-400">
             <X size={20} />
           </button>
         </div>
@@ -189,7 +172,11 @@ export default function AudioPlayer({
             min={0}
             max={duration || 0}
             value={currentTime}
-            onChange={handleSeek}
+            onChange={(e) => {
+              const t = Number(e.target.value);
+              if (audioRef.current) audioRef.current.currentTime = t;
+              setCurrentTime(t);
+            }}
             disabled={!audioUrl}
             className="flex-1 h-1.5 bg-slate-700 rounded-lg appearance-none cursor-pointer accent-emerald-500 disabled:opacity-40"
           />
@@ -198,7 +185,7 @@ export default function AudioPlayer({
 
         {/* Controls */}
         <div className="flex items-center justify-center gap-6 mt-1">
-          <button onClick={onPrev} className="p-2 hover:bg-slate-800 rounded-full active:scale-95" aria-label="Previous">
+          <button onClick={onPrev} className="p-2 hover:bg-slate-800 rounded-full active:scale-95">
             <SkipBack size={24} />
           </button>
           
@@ -206,12 +193,11 @@ export default function AudioPlayer({
             onClick={togglePlay} 
             disabled={!audioUrl}
             className="p-3 bg-emerald-600 hover:bg-emerald-500 disabled:bg-slate-700 disabled:cursor-not-allowed text-white rounded-full shadow-lg active:scale-95 transition-transform"
-            aria-label={isPlaying ? 'Pause' : 'Play'}
           >
             {isPlaying ? <Pause size={24} /> : <Play size={24} className="ml-0.5" />}
           </button>
           
-          <button onClick={onNext} className="p-2 hover:bg-slate-800 rounded-full active:scale-95" aria-label="Next">
+          <button onClick={onNext} className="p-2 hover:bg-slate-800 rounded-full active:scale-95">
             <SkipForward size={24} />
           </button>
         </div>
