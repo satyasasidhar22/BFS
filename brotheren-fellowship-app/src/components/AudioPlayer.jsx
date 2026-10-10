@@ -1,5 +1,5 @@
-﻿import React, { useRef, useEffect, useState } from 'react';
-import { Play, Pause, SkipBack, SkipForward, X, CheckCircle2, AlertCircle } from 'lucide-react';
+import React, { useRef, useEffect, useState } from 'react';
+import { Play, Pause, SkipBack, SkipForward, X, CheckCircle2, AlertCircle, Loader2 } from 'lucide-react';
 import { getCachedAudioBlob, saveAudioBlobToCache } from '../db/indexedDB';
 
 export default function AudioPlayer({ 
@@ -10,23 +10,45 @@ export default function AudioPlayer({
   requestWakeLock, 
   releaseWakeLock 
 }) {
-  const audioInstanceRef = useRef(null);
+  const audioRef = useRef(null);
   const [isPlaying, setIsPlaying] = useState(false);
   const [currentTime, setCurrentTime] = useState(0);
   const [duration, setDuration] = useState(0);
   const [isOfflineReady, setIsOfflineReady] = useState(false);
   const [errorMessage, setErrorMessage] = useState('');
   const [isLoading, setIsLoading] = useState(false);
+  const currentObjectUrlRef = useRef(null);
+
+  // Helper to resolve blob from IndexedDB trying both string and number ID types
+  const retrieveBlobSafely = async (songId) => {
+    try {
+      let b = await getCachedAudioBlob(songId);
+      if (!b && typeof songId === 'string' && !isNaN(Number(songId))) {
+        b = await getCachedAudioBlob(Number(songId));
+      }
+      if (!b && typeof songId === 'number') {
+        b = await getCachedAudioBlob(String(songId));
+      }
+      return b;
+    } catch {
+      return null;
+    }
+  };
 
   useEffect(() => {
-    let objectUrl = null;
     let isCancelled = false;
+    const audio = audioRef.current;
 
-    // Stop and clean up any previously playing audio
-    if (audioInstanceRef.current) {
-      audioInstanceRef.current.pause();
-      audioInstanceRef.current.src = '';
-      audioInstanceRef.current = null;
+    // Reset player state
+    if (audio) {
+      audio.pause();
+      audio.removeAttribute('src');
+      audio.load();
+    }
+
+    if (currentObjectUrlRef.current) {
+      URL.revokeObjectURL(currentObjectUrlRef.current);
+      currentObjectUrlRef.current = null;
     }
 
     setIsPlaying(false);
@@ -36,34 +58,34 @@ export default function AudioPlayer({
 
     if (!currentSong) return;
 
-    async function loadAudio() {
+    async function setupAudio() {
       setIsLoading(true);
 
-      let playableSource = null;
+      let playableUrl = null;
 
-      // 1. Check local IndexedDB offline storage
-      try {
-        const blob = await getCachedAudioBlob(currentSong.id);
-        if (blob && blob.size > 0) {
-          objectUrl = URL.createObjectURL(blob);
-          playableSource = objectUrl;
-          if (!isCancelled) setIsOfflineReady(true);
-        }
-      } catch (err) {
-        console.warn('Error fetching from IndexedDB:', err);
-      }
-
-      // 2. Direct Blob / File
-      if (!playableSource && currentSong.audioBlob instanceof Blob) {
-        objectUrl = URL.createObjectURL(currentSong.audioBlob);
-        playableSource = objectUrl;
+      // 1. Check local IndexedDB cache
+      const cachedBlob = await retrieveBlobSafely(currentSong.id);
+      if (cachedBlob && cachedBlob.size > 0) {
+        // Enforce audio/mpeg type if missing so mobile decoders don't reject it
+        const normalizedBlob = cachedBlob.type ? cachedBlob : new Blob([cachedBlob], { type: 'audio/mpeg' });
+        const objUrl = URL.createObjectURL(normalizedBlob);
+        currentObjectUrlRef.current = objUrl;
+        playableUrl = objUrl;
         if (!isCancelled) setIsOfflineReady(true);
       }
 
-      // 3. Fallback to Cloud URL
+      // 2. Direct Blob/File fallback
+      if (!playableUrl && currentSong.audioBlob instanceof Blob) {
+        const objUrl = URL.createObjectURL(currentSong.audioBlob);
+        currentObjectUrlRef.current = objUrl;
+        playableUrl = objUrl;
+        if (!isCancelled) setIsOfflineReady(true);
+      }
+
+      // 3. Remote URL fallback
       const remoteUrl = currentSong.audioUrl || (typeof currentSong.audioBlob === 'string' ? currentSong.audioBlob : null);
 
-      if (!playableSource && remoteUrl && typeof remoteUrl === 'string' && remoteUrl.startsWith('http')) {
+      if (!playableUrl && remoteUrl && typeof remoteUrl === 'string' && remoteUrl.startsWith('http')) {
         if (!navigator.onLine) {
           if (!isCancelled) {
             setIsLoading(false);
@@ -72,25 +94,23 @@ export default function AudioPlayer({
           return;
         }
 
-        playableSource = remoteUrl;
+        playableUrl = remoteUrl;
         if (!isCancelled) setIsOfflineReady(false);
 
-        // Download in background for future offline use
+        // Auto-download to cache in background for next time
         fetch(remoteUrl)
-          .then(res => {
-            if (!res.ok) throw new Error('Fetch failed');
-            return res.blob();
-          })
+          .then(res => res.ok ? res.blob() : null)
           .then(blob => {
-            if (!isCancelled && blob.size > 0) {
-              saveAudioBlobToCache(currentSong.id, blob);
+            if (!isCancelled && blob && blob.size > 0) {
+              const mp3Blob = blob.type ? blob : new Blob([blob], { type: 'audio/mpeg' });
+              saveAudioBlobToCache(currentSong.id, mp3Blob);
               setIsOfflineReady(true);
             }
           })
           .catch(() => {});
       }
 
-      if (!playableSource) {
+      if (!playableUrl) {
         if (!isCancelled) {
           setIsLoading(false);
           setErrorMessage('ఆడియో ఫైల్ లేదు (No audio source found)');
@@ -98,67 +118,44 @@ export default function AudioPlayer({
         return;
       }
 
-      if (isCancelled) return;
+      if (isCancelled || !audioRef.current) return;
 
-      // Create audio element cleanly with verified source
-      const audio = new Audio();
-      audio.preload = 'auto';
-      audioInstanceRef.current = audio;
+      const currentAudio = audioRef.current;
+      currentAudio.src = playableUrl;
+      currentAudio.load();
 
-      audio.onloadedmetadata = () => {
-        if (isCancelled) return;
-        const d = audio.duration;
-        if (!isNaN(d) && d > 0) setDuration(d);
-        setIsLoading(false);
-        audio.play()
-          .then(() => {
-            if (!isCancelled) setIsPlaying(true);
-          })
-          .catch(e => {
-            console.warn('Playback prevented by browser policy:', e);
-            if (!isCancelled) setIsPlaying(false);
-          });
-      };
-
-      audio.ontimeupdate = () => {
-        if (!isCancelled && audio) setCurrentTime(audio.currentTime);
-      };
-
-      audio.onended = () => {
-        if (!isCancelled) {
-          setIsPlaying(false);
-          onNext?.();
-        }
-      };
-
-      audio.onerror = (e) => {
-        if (isCancelled) return;
-        console.error('Audio playback error:', e);
-        setIsLoading(false);
-        setIsPlaying(false);
-        setErrorMessage('ఆడియో ప్లే చేయడం విఫలమైంది');
-      };
-
-      // Set the src only after all listeners are registered
-      audio.src = playableSource;
+      currentAudio.play()
+        .then(() => {
+          if (!isCancelled) {
+            setIsPlaying(true);
+            setIsLoading(false);
+          }
+        })
+        .catch(err => {
+          console.warn('Playback gesture requirement or decode delay:', err);
+          if (!isCancelled) {
+            setIsPlaying(false);
+            setIsLoading(false);
+          }
+        });
     }
 
-    loadAudio();
+    setupAudio();
 
     return () => {
       isCancelled = true;
-      if (audioInstanceRef.current) {
-        audioInstanceRef.current.pause();
-        audioInstanceRef.current.src = '';
-        audioInstanceRef.current = null;
+      if (audioRef.current) {
+        audioRef.current.pause();
+        audioRef.current.removeAttribute('src');
       }
-      if (objectUrl) {
-        URL.revokeObjectURL(objectUrl);
+      if (currentObjectUrlRef.current) {
+        URL.revokeObjectURL(currentObjectUrlRef.current);
+        currentObjectUrlRef.current = null;
       }
     };
   }, [currentSong]);
 
-  // Keep screen awake
+  // Keep screen awake while playing
   useEffect(() => {
     if (isPlaying) requestWakeLock?.();
     else releaseWakeLock?.();
@@ -166,7 +163,7 @@ export default function AudioPlayer({
   }, [isPlaying, requestWakeLock, releaseWakeLock]);
 
   const togglePlay = () => {
-    const audio = audioInstanceRef.current;
+    const audio = audioRef.current;
     if (!audio) return;
 
     if (isPlaying) {
@@ -184,7 +181,7 @@ export default function AudioPlayer({
 
   const handleSeek = (e) => {
     const time = Number(e.target.value);
-    const audio = audioInstanceRef.current;
+    const audio = audioRef.current;
     if (audio) {
       audio.currentTime = time;
       setCurrentTime(time);
@@ -202,6 +199,29 @@ export default function AudioPlayer({
 
   return (
     <div className="fixed bottom-0 left-0 right-0 bg-slate-900 border-t border-slate-800 text-white p-3 z-50 shadow-2xl safe-area-bottom">
+      {/* Declarative HTML5 Audio Element */}
+      <audio
+        ref={audioRef}
+        preload="auto"
+        onLoadedMetadata={(e) => {
+          const d = e.currentTarget.duration;
+          if (!isNaN(d) && d > 0) setDuration(d);
+          setIsLoading(false);
+        }}
+        onTimeUpdate={(e) => setCurrentTime(e.currentTarget.currentTime)}
+        onEnded={() => {
+          setIsPlaying(false);
+          onNext?.();
+        }}
+        onError={() => {
+          setIsLoading(false);
+          setIsPlaying(false);
+          if (!errorMessage) {
+            setErrorMessage('ఆడియో ప్లే చేయడం విఫలమైంది (Audio play error)');
+          }
+        }}
+      />
+
       <div className="max-w-4xl mx-auto flex flex-col gap-2">
         <div className="flex items-center justify-between">
           <div className="flex-1 truncate pr-4">
@@ -224,9 +244,7 @@ export default function AudioPlayer({
           </div>
           <button 
             onClick={() => {
-              if (audioInstanceRef.current) {
-                audioInstanceRef.current.pause();
-              }
+              if (audioRef.current) audioRef.current.pause();
               onClose?.();
             }} 
             className="p-1 hover:bg-slate-800 rounded-full text-slate-400"
@@ -263,10 +281,16 @@ export default function AudioPlayer({
             className="p-3 bg-emerald-600 hover:bg-emerald-500 disabled:bg-slate-700 disabled:cursor-not-allowed text-white rounded-full shadow-lg active:scale-95 transition-transform"
             aria-label={isPlaying ? 'Pause' : 'Play'}
           >
-            {isPlaying ? <Pause size={24} /> : <Play size={24} className="ml-0.5" />}
+            {isLoading ? (
+              <Loader2 size={24} className="animate-spin" />
+            ) : isPlaying ? (
+              <Pause size={24} />
+            ) : (
+              <Play size={24} className="ml-0.5" />
+            )}
           </button>
           
-          <button onClick={onNext} className="p-2 hover:bg-slate-800 rounded-full active:scale-95">
+          <button onClick={onNext} className="p-2 hover:bg-slate-800 rounded-full active:scale-95" aria-label="Next">
             <SkipForward size={24} />
           </button>
         </div>
