@@ -1,5 +1,5 @@
-﻿import React from 'react';
-import { ArrowLeft, Play, Heart, Mic, Edit3, Trash2 } from 'lucide-react';
+import React from 'react';
+import { ArrowLeft, Play, Heart, Mic, Edit3, Trash2, DownloadCloud, Check, Loader2 } from 'lucide-react';
 
 export default function SongDetailsModal({ 
   song, 
@@ -8,9 +8,14 @@ export default function SongDetailsModal({
   onToggleLike, 
   onEdit, 
   onDelete, 
+  onDownload,
+  isDownloaded,
+  isDownloading,
   t 
 }) {
   if (!song) return null;
+
+  const hasAudio = Boolean(song.audioUrl || (typeof song.audioBlob === 'string' && song.audioBlob.startsWith('http')));
 
   return (
     <div className="fixed inset-0 bg-slate-900/80 backdrop-blur-sm z-40 flex flex-col justify-between">
@@ -32,6 +37,28 @@ export default function SongDetailsModal({
           </div>
 
           <div className="flex items-center gap-1 shrink-0">
+            {/* Offline Download Button */}
+            {hasAudio && (
+              <button
+                onClick={(e) => onDownload && onDownload(e, song)}
+                disabled={isDownloaded || isDownloading}
+                className={`p-2 rounded-full transition-colors active:scale-90 ${
+                  isDownloaded 
+                    ? 'text-emerald-300 cursor-default' 
+                    : 'text-blue-100 hover:text-white hover:bg-blue-700'
+                }`}
+                title={isDownloaded ? 'Downloaded Offline' : 'Download for Offline'}
+              >
+                {isDownloading ? (
+                  <Loader2 size={19} className="animate-spin text-amber-300" />
+                ) : isDownloaded ? (
+                  <Check size={19} />
+                ) : (
+                  <DownloadCloud size={19} />
+                )}
+              </button>
+            )}
+
             {/* Like Button */}
             <button
               onClick={() => onToggleLike(song.id)}
@@ -64,11 +91,18 @@ export default function SongDetailsModal({
           </div>
         </div>
 
-        {/* Scrollable Song Body (with padding at bottom so audio player doesn't hide text) */}
+        {/* Scrollable Song Body */}
         <div className="flex-1 overflow-y-auto p-4 sm:p-6 space-y-4 text-slate-800 dark:text-slate-200 pb-44 max-w-3xl mx-auto w-full">
           {song.singer && (
-            <div className="flex items-center gap-2 text-sm text-slate-500 dark:text-slate-400 font-medium">
-              <Mic size={16} /> <span>{song.singer}</span>
+            <div className="flex items-center justify-between text-sm text-slate-500 dark:text-slate-400 font-medium">
+              <div className="flex items-center gap-2">
+                <Mic size={16} /> <span>{song.singer}</span>
+              </div>
+              {isDownloaded && (
+                <span className="text-xs bg-emerald-950 text-emerald-400 border border-emerald-700/50 px-2 py-0.5 rounded-full font-sans">
+                  ✓ Saved Offline
+                </span>
+              )}
             </div>
           )}
 
