@@ -1,4 +1,4 @@
-﻿import React, { useState, useEffect, useMemo, useRef } from 'react';
+import React, { useState, useEffect, useMemo, useRef } from 'react';
 import { 
   Heart, Search, PlusCircle, Settings, Play, Music, Download, Upload, Trash2, 
   BookOpen, Globe, ArrowLeft, Edit3, WifiOff, Check, DownloadCloud, Loader2
@@ -40,6 +40,38 @@ export default function App() {
   const t = translations[lang] || translations.te;
   const { requestWakeLock, releaseWakeLock } = useWakeLock();
 
+  // 1. Keep Screen Awake continuously while app is open / active
+  useEffect(() => {
+    let wakeLockSentinel = null;
+
+    const acquireLock = async () => {
+      try {
+        if ('wakeLock' in navigator) {
+          wakeLockSentinel = await navigator.wakeLock.request('screen');
+        }
+      } catch (err) {
+        console.warn('Wake Lock request skipped:', err);
+      }
+    };
+
+    acquireLock();
+
+    const handleVisibilityChange = () => {
+      if (document.visibilityState === 'visible') {
+        acquireLock();
+      }
+    };
+
+    document.addEventListener('visibilitychange', handleVisibilityChange);
+
+    return () => {
+      document.removeEventListener('visibilitychange', handleVisibilityChange);
+      if (wakeLockSentinel) {
+        wakeLockSentinel.release().catch(() => {});
+      }
+    };
+  }, []);
+
   const handleLanguageChange = (newLang) => {
     setLang(newLang);
     localStorage.setItem('app_lang', newLang);
@@ -47,8 +79,12 @@ export default function App() {
 
   // Refresh set of songs with downloaded offline audio in IndexedDB
   const refreshDownloadedSet = async () => {
-    const ids = await getAllCachedAudioIds();
-    setDownloadedIds(ids);
+    try {
+      const ids = await getAllCachedAudioIds();
+      setDownloadedIds(ids || new Set());
+    } catch (err) {
+      console.warn('Failed to load cached audio IDs:', err);
+    }
   };
 
   useEffect(() => {
@@ -156,12 +192,6 @@ export default function App() {
 
   const isViewingSubpage = Boolean(selectedLetter || showLikedOnly || searchQuery.trim());
 
-  const resetFilters = () => {
-    setSelectedLetter(null);
-    setShowLikedOnly(false);
-    setSearchQuery('');
-  };
-
   const filteredSongs = useMemo(() => {
     let result = songs;
 
@@ -184,7 +214,7 @@ export default function App() {
 
   // Download song audio to IndexedDB for guaranteed offline playback
   const handleDownloadSongOffline = async (e, song) => {
-    e.stopPropagation();
+    if (e && e.stopPropagation) e.stopPropagation();
     const url = song.audioUrl || (typeof song.audioBlob === 'string' ? song.audioBlob : null);
     if (!url || !url.startsWith('http')) return;
 
@@ -196,9 +226,30 @@ export default function App() {
       await saveAudioBlobToCache(song.id, blob);
       await refreshDownloadedSet();
     } catch (err) {
+      console.error(err);
       alert('Could not download audio. Please check internet connection.');
     } finally {
       setDownloadingId(null);
+    }
+  };
+
+  // 2. Auto-cache audio into IndexedDB on play if online and not yet cached
+  const handlePlaySong = (e, song) => {
+    if (e && e.stopPropagation) e.stopPropagation();
+    setActiveSong(song);
+
+    if (navigator.onLine && song && !downloadedIds.has(String(song.id))) {
+      const url = song.audioUrl || (typeof song.audioBlob === 'string' ? song.audioBlob : null);
+      if (url && url.startsWith('http')) {
+        fetch(url)
+          .then(res => res.ok ? res.blob() : null)
+          .then(blob => {
+            if (blob) {
+              saveAudioBlobToCache(song.id, blob).then(() => refreshDownloadedSet());
+            }
+          })
+          .catch(() => {});
+      }
     }
   };
 
@@ -208,7 +259,7 @@ export default function App() {
     const currentIndex = filteredSongs.findIndex(s => String(s.id) === String(activeSong.id));
     if (currentIndex !== -1 && currentIndex < filteredSongs.length - 1) {
       const next = filteredSongs[currentIndex + 1];
-      setActiveSong(next);
+      handlePlaySong(null, next);
       if (detailSong) setDetailSong(next);
     }
   };
@@ -218,7 +269,7 @@ export default function App() {
     const currentIndex = filteredSongs.findIndex(s => String(s.id) === String(activeSong.id));
     if (currentIndex > 0) {
       const prev = filteredSongs[currentIndex - 1];
-      setActiveSong(prev);
+      handlePlaySong(null, prev);
       if (detailSong) setDetailSong(prev);
     }
   };
@@ -233,12 +284,6 @@ export default function App() {
   const handleSelectSong = (song) => {
     window.history.pushState({ view: 'song', id: song.id }, '');
     setDetailSong(song);
-  };
-
-  // Play button click (starts playback without adding history entry)
-  const handlePlaySong = (e, song) => {
-    e.stopPropagation();
-    setActiveSong(song);
   };
 
   // Back click handler for UI buttons
@@ -516,7 +561,7 @@ export default function App() {
                 <Settings size={18} /> {t.dataManagement}
               </h3>
               <button 
-                onClick={() => setShowSettings(false)}
+                onClick={() => setShowSettings(false)} 
                 className="text-xs text-slate-400 hover:text-slate-200 underline"
               >
                 {t.cancel}
@@ -524,20 +569,20 @@ export default function App() {
             </div>
             <div className="flex flex-wrap gap-2 text-sm">
               <button 
-                onClick={handleExport}
+                onClick={handleExport} 
                 className="flex items-center gap-1.5 px-3 py-2 bg-slate-800 hover:bg-slate-700 text-slate-200 rounded-xl"
               >
                 <Download size={16} /> {t.exportSongs}
               </button>
               <button 
-                onClick={() => fileInputRef.current?.click()}
+                onClick={() => fileInputRef.current?.click()} 
                 className="flex items-center gap-1.5 px-3 py-2 bg-slate-800 hover:bg-slate-700 text-slate-200 rounded-xl"
               >
                 <Upload size={16} /> {t.importSongs}
               </button>
               <input ref={fileInputRef} type="file" accept=".json" onChange={handleImport} className="hidden" />
               <button 
-                onClick={handleClearAll}
+                onClick={handleClearAll} 
                 className="flex items-center gap-1.5 px-3 py-2 bg-rose-950/40 text-rose-300 rounded-xl hover:bg-rose-900"
               >
                 <Trash2 size={16} /> {t.deleteAll}
@@ -617,7 +662,7 @@ export default function App() {
                 {showLikedOnly 
                   ? `${t.likedSongs} (${filteredSongs.length})` 
                   : selectedLetter 
-                    ? `${t.songsStartingWith.replace('{letter}', selectedLetter)} (${filteredSongs.length})`
+                    ? `${t.songsStartingWith.replace('{letter}', selectedLetter)} (${filteredSongs.length})` 
                     : `Search Results (${filteredSongs.length})`}
               </span>
               <button 
@@ -636,8 +681,8 @@ export default function App() {
                   const hasAudio = Boolean(song.audioUrl || (typeof song.audioBlob === 'string' && song.audioBlob.startsWith('http')));
 
                   return (
-                    <div
-                      key={song.id}
+                    <div 
+                      key={song.id} 
                       className="bg-slate-900 border border-slate-800 hover:border-blue-500 rounded-2xl p-4 flex items-center justify-between gap-3 shadow-sm transition-all"
                     >
                       <div 
@@ -730,10 +775,13 @@ export default function App() {
         <SongDetailsModal
           song={detailSong}
           onClose={handleGoBack}
-          onPlay={(s) => setActiveSong(s)}
+          onPlay={(s) => handlePlaySong(null, s)}
           onToggleLike={handleToggleLike}
           onEdit={handleOpenEdit}
           onDelete={handleDeleteSong}
+          onDownload={handleDownloadSongOffline}
+          isDownloaded={downloadedIds.has(String(detailSong.id))}
+          isDownloading={downloadingId === String(detailSong.id)}
           t={t}
         />
       )}
